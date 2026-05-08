@@ -1,0 +1,584 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    SECURE CODE REVIEW REPORT
+                     Python Flask Web Application
+═══════════════════════════════════════════════════════════════════════════════
+
+TASK: Task 1 - Secure Coding Review
+LANGUAGE: Python (Flask Framework)
+APPLICATION: Vulnerable Flask Web Application
+REVIEW DATE: May 8, 2026
+REVIEWER: Security Code Audit Tool
+
+───────────────────────────────────────────────────────────────────────────────
+EXECUTIVE SUMMARY
+───────────────────────────────────────────────────────────────────────────────
+
+The code review identified 9 CRITICAL security vulnerabilities that pose significant
+risks to the application and its users. Immediate remediation is required before
+deploying to production.
+
+Risk Level: 🔴 CRITICAL
+Total Vulnerabilities: 9
+  - Critical: 6
+  - High: 2
+  - Medium: 1
+
+───────────────────────────────────────────────────────────────────────────────
+DETAILED FINDINGS
+───────────────────────────────────────────────────────────────────────────────
+
+VULNERABILITY #1: SQL INJECTION (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /login route, line 38-40
+Severity: 🔴 CRITICAL
+
+Description:
+User input is directly concatenated into SQL queries without sanitization.
+
+Vulnerable Code:
+    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"
+    cursor.execute(query)
+
+Attack Vector:
+An attacker can input: username = "' OR '1'='1' --" to bypass authentication:
+    SELECT * FROM users WHERE username='' OR '1'='1' --' AND password='...'
+
+Impact:
+- Unauthorized access to user accounts
+- Disclosure of sensitive user data
+- Modification/deletion of database records
+- Complete database compromise
+
+Remediation:
+Use parameterized queries (prepared statements):
+    
+    ✅ SECURE CODE:
+    cursor.execute("SELECT * FROM users WHERE username=? AND password=?", 
+                   (username, password))
+
+Best Practice: Always use parameterized queries with placeholders (?) for SQLite
+or %s for MySQL to prevent SQL injection.
+
+
+VULNERABILITY #2: HARDCODED SECRET KEY (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: Line 10
+Severity: 🔴 CRITICAL
+
+Description:
+Flask secret key is hardcoded in source code, exposing session data.
+
+Vulnerable Code:
+    app.secret_key = "hardcoded_secret_key_12345"
+
+Impact:
+- Session cookies can be forged
+- Session hijacking attacks possible
+- CSRF token validation can be bypassed
+- Attackers can impersonate users
+
+Remediation:
+
+    ✅ SECURE CODE:
+    import os
+    from dotenv import load_dotenv
+    
+    load_dotenv()
+    app.secret_key = os.getenv('SECRET_KEY')
+    
+    # Store in .env file:
+    # SECRET_KEY=your-secure-random-key-here
+    
+    # Generate secure key:
+    import secrets
+    app.secret_key = secrets.token_hex(32)
+
+Best Practice: Never hardcode secrets. Use environment variables or secure
+secret management systems (AWS Secrets Manager, HashiCorp Vault, etc.)
+
+
+VULNERABILITY #3: REFLECTED XSS (Cross-Site Scripting) (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /search route, line 56
+Severity: 🔴 CRITICAL
+
+Description:
+User input is directly rendered in HTML without escaping.
+
+Vulnerable Code:
+    query = request.args.get('q', '')
+    return f"<h1>Search Results for: {query}</h1>"
+
+Attack Vector:
+URL: /search?q=<script>alert('XSS')</script>
+Rendered as: <h1>Search Results for: <script>alert('XSS')</script></h1>
+
+Impact:
+- Session cookie theft
+- Malware injection
+- Credential harvesting
+- Website defacement
+- Phishing attacks
+
+Remediation:
+
+    ✅ SECURE CODE - Option 1: Use Jinja2 Auto-escaping
+    from flask import escape
+    
+    query = request.args.get('q', '')
+    return f"<h1>Search Results for: {escape(query)}</h1>"
+    
+    ✅ SECURE CODE - Option 2: Use Jinja2 Templates (Recommended)
+    from flask import render_template
+    
+    @app.route('/search')
+    def search():
+        query = request.args.get('q', '')
+        return render_template('search.html', query=query)
+    
+    # In search.html:
+    <h1>Search Results for: {{ query }}</h1>
+
+Best Practice: Always escape user input when rendering in HTML. Jinja2 templates
+auto-escape by default when using {{ }} syntax.
+
+
+VULNERABILITY #4: MISSING AUTHENTICATION CHECK (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /profile/<user_id> route, line 62-68
+Severity: 🔴 CRITICAL
+
+Description:
+No authentication or authorization checks. Any user can access any profile.
+
+Vulnerable Code:
+    @app.route('/profile/<user_id>')
+    def profile(user_id):
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(f"SELECT * FROM users WHERE id={user_id}")
+        user = cursor.fetchone()
+        return f"User: {user}"
+
+Impact:
+- Unauthorized access to user profiles
+- Disclosure of private user information
+- Violation of user privacy and GDPR compliance
+
+Remediation:
+
+    ✅ SECURE CODE:
+    from functools import wraps
+    from flask import session
+    
+    def login_required(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if 'user_id' not in session:
+                return redirect('/login')
+            return f(*args, **kwargs)
+        return decorated_function
+    
+    @app.route('/profile/<user_id>')
+    @login_required
+    def profile(user_id):
+        # Ensure user can only view their own profile
+        if int(user_id) != session.get('user_id'):
+            return "Unauthorized", 403
+        
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+        user = cursor.fetchone()
+        return f"User: {user}"
+
+Best Practice: Implement proper authentication and authorization checks on all
+sensitive routes.
+
+
+VULNERABILITY #5: UNSAFE FILE UPLOAD (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /upload route, line 70-75
+Severity: 🔴 CRITICAL
+
+Description:
+Files are saved with user-supplied names without validation. No file type checking.
+
+Vulnerable Code:
+    @app.route('/upload', methods=['POST'])
+    def upload():
+        file = request.files['file']
+        file.save(os.path.join('/tmp', file.filename))
+        return "File uploaded"
+
+Attack Vectors:
+1. Path traversal: filename = "../../etc/passwd"
+2. Malicious executable upload: filename = "shell.php"
+3. Zip bomb / denial of service
+
+Impact:
+- Remote code execution (RCE)
+- Server filesystem compromise
+- Denial of service attacks
+- Malware distribution
+
+Remediation:
+
+    ✅ SECURE CODE:
+    import os
+    from werkzeug.utils import secure_filename
+    from flask import abort
+    
+    ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg'}
+    MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+    UPLOAD_FOLDER = '/tmp/uploads'
+    
+    def allowed_file(filename):
+        return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    
+    @app.route('/upload', methods=['POST'])
+    @login_required
+    def upload():
+        file = request.files['file']
+        
+        # Validate file exists
+        if not file or file.filename == '':
+            return "No file selected", 400
+        
+        # Validate file extension
+        if not allowed_file(file.filename):
+            return "File type not allowed", 400
+        
+        # Validate file size
+        file.seek(0, os.SEEK_END)
+        file_length = file.tell()
+        if file_length > MAX_FILE_SIZE:
+            return "File too large", 400
+        
+        # Use secure filename and generate unique name
+        filename = secure_filename(file.filename)
+        unique_filename = f"{user_id}_{uuid.uuid4()}_{filename}"
+        
+        filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
+        file.save(filepath)
+        return "File uploaded successfully"
+
+Best Practice: 
+- Use secure_filename() for file names
+- Validate file extension and MIME type
+- Limit file size
+- Store files outside web root
+- Generate unique filenames
+
+
+VULNERABILITY #6: UNSAFE DESERIALIZATION (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /deserialize route, line 83-87
+Severity: 🔴 CRITICAL
+
+Description:
+Unsafe deserialization of untrusted data using pickle module.
+
+Vulnerable Code:
+    @app.route('/deserialize', methods=['POST'])
+    def deserialize():
+        data = request.form.get('data')
+        obj = pickle.loads(data)
+        return str(obj)
+
+Impact:
+- Remote Code Execution (RCE)
+- Complete system compromise
+- Arbitrary command execution with app privileges
+
+Remediation:
+
+    ✅ SECURE CODE - Option 1: Use JSON instead of pickle
+    import json
+    
+    @app.route('/deserialize', methods=['POST'])
+    def deserialize():
+        try:
+            data = request.form.get('data')
+            obj = json.loads(data)
+            return str(obj)
+        except json.JSONDecodeError:
+            return "Invalid JSON", 400
+    
+    ✅ SECURE CODE - Option 2: Use restricted unpickler
+    import pickle
+    import io
+    
+    class RestrictedUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            # Whitelist safe classes only
+            if module == "builtins" and name in ("list", "dict", "str"):
+                return getattr(__builtins__, name)
+            raise pickle.UnpicklingError(f"Forbidden: {module}.{name}")
+
+Best Practice: Never use pickle to deserialize untrusted data. Use JSON for
+serialization instead. If pickle is necessary, use RestrictedUnpickler.
+
+
+VULNERABILITY #7: DEBUG MODE ENABLED (HIGH)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: Line 88
+Severity: 🔟 HIGH
+
+Description:
+Flask debug mode enabled in production. Exposes sensitive information.
+
+Vulnerable Code:
+    if __name__ == '__main__':
+        app.run(debug=True)
+
+Impact:
+- Detailed error messages with code context
+- Stack traces revealing internal architecture
+- Interactive debugger accessible to attackers
+- Information disclosure
+
+Remediation:
+
+    ✅ SECURE CODE:
+    import os
+    
+    if __name__ == '__main__':
+        debug_mode = os.getenv('FLASK_ENV') == 'development'
+        app.run(debug=debug_mode)
+    
+    # In production environment:
+    # FLASK_ENV=production
+
+Best Practice: Disable debug mode in production. Use environment-specific
+configuration.
+
+
+VULNERABILITY #8: INFORMATION DISCLOSURE (HIGH)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /debug route, line 78-81
+Severity: 🟠 HIGH
+
+Description:
+Debug endpoint exposes sensitive system information publicly.
+
+Vulnerable Code:
+    @app.route('/debug')
+    def debug():
+        import sys
+        return f"Python path: {sys.path}<br>OS environ: {os.environ}"
+
+Impact:
+- System architecture disclosure
+- Environment variable leakage (API keys, secrets)
+- Easier exploitation planning for attackers
+
+Remediation:
+
+    ✅ SECURE CODE - Remove debug endpoint entirely
+    # Remove the entire /debug route
+    
+    ✅ ALTERNATIVE: Restrict to localhost only
+    from flask import request
+    
+    @app.route('/debug')
+    def debug():
+        if request.remote_addr != '127.0.0.1':
+            return "Unauthorized", 403
+        # debug code only for local development
+
+Best Practice: Remove debug endpoints or restrict to development environment only.
+
+
+VULNERABILITY #9: SQL INJECTION IN API (CRITICAL)
+═════════════════════════════════════════════════════════════════════════════
+
+Location: /api/data route, line 76-82
+Severity: 🔴 CRITICAL
+
+Description:
+Same SQL injection vulnerability in another endpoint.
+
+Vulnerable Code:
+    @app.route('/api/data')
+    def api_data():
+        user_id = request.args.get('id')
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(f"SELECT * FROM users WHERE id={user_id}")
+        user = cursor.fetchone()
+        return str(user)
+
+Remediation:
+
+    ✅ SECURE CODE:
+    @app.route('/api/data')
+    def api_data():
+        try:
+            user_id = request.args.get('id')
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+            user = cursor.fetchone()
+            return str(user)
+        except Exception as e:
+            return "Error processing request", 400
+
+Best Practice: Same as Vulnerability #1 - always use parameterized queries.
+
+───────────────────────────────────────────────────────────────────────────────
+BEST PRACTICES & RECOMMENDATIONS
+───────────────────────────────────────────────────────────────────────────────
+
+1. INPUT VALIDATION
+   ✓ Validate all user input on server-side
+   ✓ Use whitelisting instead of blacklisting
+   ✓ Implement type checking for parameters
+   ✓ Set length limits on input fields
+
+2. DATABASE SECURITY
+   ✓ Always use parameterized queries/prepared statements
+   ✓ Apply principle of least privilege to database users
+   ✓ Never expose database errors to users
+   ✓ Use database connection pooling
+   ✓ Encrypt sensitive data at rest
+
+3. AUTHENTICATION & AUTHORIZATION
+   ✓ Implement strong authentication (bcrypt, scrypt)
+   ✓ Use secure session management
+   ✓ Implement account lockout after failed login attempts
+   ✓ Add rate limiting on login endpoints
+   ✓ Use HTTPS/TLS for all communications
+
+4. SECRETS MANAGEMENT
+   ✓ Never hardcode secrets in source code
+   ✓ Use environment variables or secret management systems
+   ✓ Rotate secrets regularly
+   ✓ Use strong random key generation
+
+5. ERROR HANDLING
+   ✓ Don't expose system errors to users
+   ✓ Log errors securely for debugging
+   ✓ Implement proper exception handling
+   ✓ Use generic error messages for users
+
+6. CONFIGURATION SECURITY
+   ✓ Disable debug mode in production
+   ✓ Use secure default configurations
+   ✓ Separate development, staging, and production configs
+   ✓ Use environment-specific settings
+
+7. DEPENDENCIES
+   ✓ Keep all libraries updated
+   ✓ Regularly scan for vulnerable dependencies (pip-audit, safety)
+   ✓ Pin specific versions in requirements.txt
+   ✓ Review security advisories for used packages
+
+8. OUTPUT ENCODING
+   ✓ Always escape user input in HTML context
+   ✓ Use Jinja2 templates with auto-escaping enabled
+   ✓ HTML-encode, URL-encode, or JavaScript-encode as needed
+   ✓ Implement Content Security Policy (CSP) headers
+
+───────────────────────────────────────────────────────────────────────────────
+REMEDIATION TIMELINE
+───────────────────────────────────────────────────────────────────────────────
+
+IMMEDIATE (Within 24 hours):
+□ Fix SQL injection vulnerabilities (all 3 instances)
+□ Remove debug endpoint (/debug route)
+□ Fix hardcoded secret key
+□ Fix XSS vulnerability in /search
+
+SHORT-TERM (Within 1 week):
+□ Implement authentication/authorization checks
+□ Fix file upload validation
+□ Disable debug mode
+□ Implement input validation framework
+
+MEDIUM-TERM (Within 2 weeks):
+□ Remove unsafe pickle deserialization
+□ Add HTTPS/TLS
+□ Implement security headers (CSP, X-Frame-Options, etc.)
+□ Add logging and monitoring
+
+LONG-TERM (Ongoing):
+□ Security testing (penetration testing, fuzzing)
+□ Code review process implementation
+□ Security awareness training for developers
+□ Regular dependency audits
+□ Regular security assessments
+
+───────────────────────────────────────────────────────────────────────────────
+TOOLS & FRAMEWORKS RECOMMENDED
+───────────────────────────────────────────────────────────────────────────────
+
+Static Analysis Tools:
+- bandit: Security linter for Python
+- pylint: General Python code analysis
+- flake8: Style guide enforcement
+- OWASP Dependency-Check: Vulnerable dependencies
+
+Testing Tools:
+- pytest: Unit testing
+- SQLAlchemy ORM: Safe database access
+- flask-wtf: CSRF protection for forms
+
+Security Libraries:
+- werkzeug: Secure file handling (secure_filename)
+- python-dotenv: Environment variable management
+- cryptography: Secure encryption
+- bcrypt: Password hashing
+
+Configuration:
+- Flask-Talisman: Security headers
+- Flask-Limiter: Rate limiting
+- Flask-SQLAlchemy: Safe ORM layer
+
+───────────────────────────────────────────────────────────────────────────────
+COMMAND TO RUN AUTOMATED SECURITY CHECKS
+───────────────────────────────────────────────────────────────────────────────
+
+# Install security tools
+pip install bandit safety pylint
+
+# Run bandit on the application
+bandit vulnerable_app.py
+
+# Check for vulnerable dependencies
+safety check
+
+# Run pylint
+pylint vulnerable_app.py
+
+───────────────────────────────────────────────────────────────────────────────
+CONCLUSION
+───────────────────────────────────────────────────────────────────────────────
+
+This application is NOT SAFE for production use in its current state.
+Multiple critical vulnerabilities require immediate remediation.
+
+The most urgent issues are:
+1. SQL Injection (affects login and data access)
+2. Cross-Site Scripting (affects search functionality)
+3. Unsafe Deserialization (enables remote code execution)
+4. Missing Authentication (allows unauthorized access)
+
+Estimated effort to remediate: 3-5 days for a single developer.
+
+After remediation, comprehensive security testing is recommended:
+- Penetration testing
+- Code review by security professional
+- Automated security scanning
+
+═══════════════════════════════════════════════════════════════════════════════
+END OF REPORT
+═══════════════════════════════════════════════════════════════════════════════
